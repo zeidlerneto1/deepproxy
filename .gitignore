@@ -3,9 +3,11 @@ dist/
 deepseek_profile/
 .env
 .env.local
+env.txt
 *.log
 .DS_Store
 coverage/
 .cache/
 .kilo
 start-deepsproxy.sh
+.aider*

@@ -21,6 +21,13 @@ const TOOL_START = '<tool_call>';
 const TOOL_END = '</tool_call>';
 const TOOL_OPEN_RE = /<tool_call\b[^>]*>/i;
 
+// DeepSeek Markup Language (DSML) native tool-call format. DeepSeek sometimes
+// emits tool calls as `<\uFF5C\uFF5CDSML\uFF5C\uFF5C invoke ...>` blocks instead
+// of the `<tool_call>` JSON format we instruct it to use. The delimiter is two
+// fullwidth vertical-line chars (U+FF5C) wrapped around the literal "DSML".
+const DSML_OPEN_RE = /<\uFF5C\uFF5CDSML\uFF5C\uFF5C/i;
+const DSML_CLOSE_RE = /<\/\uFF5C\uFF5CDSML\uFF5C\uFF5C/i;
+
 type EmitChunk = (data: any) => Promise<void>;
 
 interface ParsedCompletion {
@@ -179,7 +186,31 @@ function parseXmlParameterToolCall(block: string, openTag: string, tools: any[])
   return { name: toolName, arguments: args };
 }
 
+function parseDSMLToolCall(block: string, openTag: string = ''): any | null {
+  // DSML block shape (openTag holds the <\uFF5C\uFF5CDSML\uFF5C\uFF5C invoke name="Tool">):
+  //   <\uFF5C\uFF5CDSML\uFF5C\uFF5C parameter name="arg" string="true">value<\uFF5C\uFF5CDSML\uFF5C\uFF5C parameter>
+  const combined = `${openTag}\n${block}`;
+  const invokeNameRe = /<\uFF5C\uFF5CDSML\uFF5C\uFF5C\s+invoke\b[^>]*\bname\s*=\s*["']([^"']+)["']/i;
+  const nameMatch = combined.match(invokeNameRe);
+  if (!nameMatch) return null;
+  const toolName = nameMatch[1].trim();
+  if (!toolName) return null;
+
+  const args: Record<string, unknown> = {};
+  const paramRe = /<\uFF5C\uFF5CDSML\uFF5C\uFF5C\s+parameter\b[^>]*\bname\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/\uFF5C\uFF5CDSML\uFF5C\uFF5C\s+parameter\s*>/gi;
+  let pm: RegExpExecArray | null;
+  while ((pm = paramRe.exec(block)) !== null) {
+    args[pm[1].trim()] = coerceParameterValue(pm[2]);
+  }
+
+  if (Object.keys(args).length === 0) return null;
+  return { name: toolName, arguments: args };
+}
+
 function parseToolCallBlock(block: string, openTag: string, tools: any[]): any {
+  const parsedDSML = parseDSMLToolCall(block, openTag);
+  if (parsedDSML) return parsedDSML;
+
   const parsedXml = parseXmlParameterToolCall(block, openTag, tools);
   if (parsedXml) return parsedXml;
 
@@ -192,20 +223,45 @@ function parseToolCallBlock(block: string, openTag: string, tools: any[]): any {
   return parsedJson;
 }
 
-function findToolOpen(buffer: string): { startIdx: number; endIdx: number; openTag: string } | null {
+function findToolOpen(buffer: string): { startIdx: number; endIdx: number; openTag: string; kind: 'tool_call' | 'dsml' } | null {
+  // DSML block: find the inner <\uFF5C\uFF5CDSML\uFF5C\uFF5C invoke ...> tag
+  const invokeRe = /<\uFF5C\uFF5CDSML\uFF5C\uFF5C\s+invoke\b[^>]*>/i;
+  const invokeMatch = buffer.match(invokeRe);
+  if (invokeMatch && invokeMatch.index !== undefined) {
+    return {
+      startIdx: invokeMatch.index,
+      endIdx: invokeMatch.index + invokeMatch[0].length,
+      openTag: invokeMatch[0],
+      kind: 'dsml',
+    };
+  }
+
   const match = buffer.match(TOOL_OPEN_RE);
-  if (!match || match.index === undefined) return null;
-  return {
-    startIdx: match.index,
-    endIdx: match.index + match[0].length,
-    openTag: match[0]
-  };
+  if (match && match.index !== undefined) {
+    return {
+      startIdx: match.index,
+      endIdx: match.index + match[0].length,
+      openTag: match[0],
+      kind: 'tool_call',
+    };
+  }
+
+  return null;
 }
 
 function findPartialToolOpenIndex(buffer: string): number {
   const lower = buffer.toLowerCase();
   const idx = lower.lastIndexOf('<tool_call');
   if (idx !== -1 && lower.indexOf('>', idx) === -1) return idx;
+
+  // Any unclosed '<' at the tail may be the start of a DSML tag, a
+  // <\uFF5C\uFF5CDSML\uFF5C\uFF5C calls> wrapper, or a <tool_call> tag split
+  // across chunks. Hold the whole buffer back so a tag is never split at the
+  // content/tool boundary.
+  for (let i = lower.length - 1; i >= 0; i--) {
+    if (lower[i] === '>') break;
+    if (lower[i] === '<') return i;
+  }
 
   for (let i = 1; i < TOOL_START.length; i++) {
     if (lower.endsWith(TOOL_START.substring(0, i))) return buffer.length - i;
@@ -253,6 +309,8 @@ async function parseDeepSeekStreamToOpenAI(
   let contentEmitBuffer = '';
   let insideTool = false;
   let currentToolOpenTag = TOOL_START;
+  let currentToolKind: 'tool_call' | 'dsml' = 'tool_call';
+  let inDsmlContainer = false;
   let emittedToolCallCount = 0;
   let completionTokens = 0;
   const toolCalls: ToolCall[] = [];
@@ -407,6 +465,26 @@ async function parseDeepSeekStreamToOpenAI(
 
         while (contentEmitBuffer.length > 0) {
           if (!insideTool) {
+            // DSML wrappers: <\uFF5C\uFF5CDSML\uFF5C\uFF5C calls> ... </\uFF5C\uFF5CDSML\uFF5C\uFF5C calls>
+            // wrap one or more <... invoke ...> blocks. We discard the wrapper
+            // text itself and only surface the invokes as tool calls.
+            const openWrapper = contentEmitBuffer.match(/<\uFF5C\uFF5CDSML\uFF5C\uFF5C\s+calls\s*>/i);
+            const closeWrapper = contentEmitBuffer.match(/<\/\uFF5C\uFF5CDSML\uFF5C\uFF5C\s+calls\s*>/i);
+            if (openWrapper && openWrapper.index !== undefined) {
+              const lead = contentEmitBuffer.substring(0, openWrapper.index);
+              await emitContent(lead);
+              inDsmlContainer = true;
+              contentEmitBuffer = contentEmitBuffer.substring(openWrapper.index + openWrapper[0].length);
+              continue;
+            }
+            if (closeWrapper && closeWrapper.index !== undefined) {
+              const lead = contentEmitBuffer.substring(0, closeWrapper.index);
+              await emitContent(lead);
+              inDsmlContainer = false;
+              contentEmitBuffer = contentEmitBuffer.substring(closeWrapper.index + closeWrapper[0].length);
+              continue;
+            }
+
             const toolOpen = findToolOpen(contentEmitBuffer);
             if (toolOpen) {
               // Once a tool call appears, do not emit the lead-in text as
@@ -415,21 +493,43 @@ async function parseDeepSeekStreamToOpenAI(
               pendingToolLeadIn += contentEmitBuffer.substring(0, toolOpen.startIdx);
               insideTool = true;
               currentToolOpenTag = toolOpen.openTag;
+              currentToolKind = toolOpen.kind;
               contentEmitBuffer = contentEmitBuffer.substring(toolOpen.endIdx);
               continue;
             }
 
             const partialStartIdx = findPartialToolOpenIndex(contentEmitBuffer);
-            const flushIndex = partialStartIdx === -1 ? contentEmitBuffer.length : partialStartIdx;
+            if (partialStartIdx !== -1) {
+              // Hold the buffer: a tag may be split across chunks.
+              break;
+            }
 
-            const textToEmit = contentEmitBuffer.substring(0, flushIndex);
-            await emitContent(textToEmit);
-            contentEmitBuffer = contentEmitBuffer.substring(flushIndex);
+            // Inside a DSML container the inter-invoke text is formatting only;
+            // do not leak it to the user-visible content.
+            if (inDsmlContainer) {
+              contentEmitBuffer = '';
+              break;
+            }
+
+            await emitContent(contentEmitBuffer);
+            contentEmitBuffer = '';
             break;
           }
 
           const lowerBuffer = contentEmitBuffer.toLowerCase();
-          const endIdx = lowerBuffer.indexOf(TOOL_END);
+          // Find the closing tag for the current tool format.
+          let endIdx = -1;
+          let closeLen = 0;
+          if (currentToolKind === 'dsml') {
+            const dsmlClose = contentEmitBuffer.match(/<\/\uFF5C\uFF5CDSML\uFF5C\uFF5C\s+invoke\s*>/i);
+            if (dsmlClose && dsmlClose.index !== undefined) {
+              endIdx = dsmlClose.index;
+              closeLen = dsmlClose[0].length;
+            }
+          } else {
+            endIdx = lowerBuffer.indexOf(TOOL_END);
+            closeLen = TOOL_END.length;
+          }
           if (endIdx === -1) break;
 
           const toolBlock = contentEmitBuffer.substring(0, endIdx).trim();
@@ -449,7 +549,8 @@ async function parseDeepSeekStreamToOpenAI(
 
           insideTool = false;
           currentToolOpenTag = TOOL_START;
-          contentEmitBuffer = contentEmitBuffer.substring(endIdx + TOOL_END.length);
+          currentToolKind = 'tool_call';
+          contentEmitBuffer = contentEmitBuffer.substring(endIdx + closeLen);
         }
       } catch (e) {
         // Ignore partial or malformed DeepSeek chunks.
@@ -471,7 +572,10 @@ async function parseDeepSeekStreamToOpenAI(
   }
 
   if (!insideTool && contentEmitBuffer.length > 0 && emittedToolCallCount === 0) {
-    await emitContent(contentEmitBuffer);
+    // Never leak leftover DSML container formatting to the user-visible content.
+    if (!inDsmlContainer) {
+      await emitContent(contentEmitBuffer);
+    }
   }
 
   const usage: Usage = {

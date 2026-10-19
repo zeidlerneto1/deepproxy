@@ -2,6 +2,15 @@
 
 Proxy API local compatível com OpenAI que roteia requisições para modelos DeepSeek, com integração de automação de navegador via Playwright para execução de ferramentas e interações web.
 
+> ## 🍴 Fork
+>
+> Este repositório é um **fork** de [`pedrofariasx/deepsproxy`](https://github.com/pedrofariasx/deepsproxy).
+> Todo o crédito pelo projeto original vai para o autor original. Este fork adiciona:
+> - Suporte a `PLAYWRIGHT_CHANNEL` (usar Chrome/Edge do sistema em vez de baixar o Chromium).
+> - Mitigação de erros TLS intermitentes via `DEEPSPROXY_INSECURE_TLS`.
+> - Conversão automática do formato nativo **DSML** do DeepSeek para `tool_calls` compatíveis com OpenAI (integração com o Kimi Code CLI).
+> - Documentação de integração em [`docs/INTEGRACAO_KIMI.md`](docs/INTEGRACAO_KIMI.md).
+
 
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0-blue)](https://www.typescriptlang.org/)
 [![Hono](https://img.shields.io/badge/Hono-4.0-green)](https://hono.dev/)
@@ -15,6 +24,7 @@ Proxy API local compatível com OpenAI que roteia requisições para modelos Dee
 - **OpenAI API Compatible**: Interface compatível com `/v1/chat/completions` e `/v1/models`
 - **Tool Execution**: Sistema de ferramentas executáveis via Playwright
 - **Session Persistence**: Login persistente com armazenamento de perfil do navegador
+- **Tool Calling nativo**: Converte automaticamente o formato nativo DSML do DeepSeek em `tool_calls` compatíveis com OpenAI
 - **Authentication**: Suporte opcional a API Key via header `Authorization` ou `X-API-Key`
 - **Type-Safe**: Código 100% TypeScript com strict mode
 - **Docker Ready**: Deploy simplificado com Docker Compose
@@ -107,6 +117,8 @@ LOG_LEVEL=info
 | `API_KEY` | Chave para autenticação de requests | - | Não |
 | `PLAYWRIGHT_HEADLESS` | Executar browser em modo headless | `true` | Não |
 | `PLAYWRIGHT_TIMEOUT` | Timeout para operações do Playwright (ms) | `30000` | Não |
+| `PLAYWRIGHT_CHANNEL` | Usar navegador instalado via canal do Playwright (ex.: `chrome`, `msedge`) em vez de baixar o Chromium | - | Não |
+| `DEEPSPROXY_INSECURE_TLS` | Relaxar a verificação TLS na conexão com `chat.deepseek.com` (`true`). Útil quando um antivírus/firewall com inspeção SSL injeta cert auto-assinado de forma intermitente | `false` | Não |
 
 \* Necessária para funcionalidades que requerem acesso à API DeepSeek
 
@@ -402,6 +414,14 @@ npm test -- src/index.test.ts
 # Coverage report
 npm run test:coverage
 ```
+
+---
+
+## 🔌 Integração com Kimi Code CLI
+
+Use o DeepsProxy como backend OpenAI-compatível do **Kimi Code CLI** (agente de código
+da Moonshot) para conversar e executar ferramentas com modelos DeepSeek. Veja o guia
+completo em [`docs/INTEGRACAO_KIMI.md`](docs/INTEGRACAO_KIMI.md).
 
 ---
 

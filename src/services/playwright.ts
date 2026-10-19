@@ -23,8 +23,14 @@ export async function initPlaywright(headless = true) {
 
   const profilePath = path.resolve('deepseek_profile');
 
+  // Use an already-installed browser via a Playwright channel when available
+  // (e.g. "chrome" for system Chrome, "msedge" for Edge). This avoids the large
+  // bundled Chromium download. Falls back to the bundled browser when unset/empty.
+  const channel = process.env.PLAYWRIGHT_CHANNEL || undefined;
+
   context = await chromium.launchPersistentContext(profilePath, {
     headless,
+    ...(channel ? { channel } : {}),
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
     args: [
       '--disable-blink-features=AutomationControlled',

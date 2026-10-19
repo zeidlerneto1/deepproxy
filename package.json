@@ -17,6 +17,7 @@
     "dotenv": "^17.4.2",
     "hono": "^4.12.18",
     "playwright": "^1.59.1",
+    "undici": "^8.12.3",
     "uuid": "^14.0.0"
   },
   "devDependencies": {
