@@ -14,7 +14,8 @@ import { cors } from 'hono/cors';
 import { chatCompletions } from './routes/chat.ts';
 import * as dotenv from 'dotenv';
 import { initPlaywright } from './services/playwright.ts';
-import { getContextLength } from './services/telemetry.ts';
+import { getContextLength, applyDiscoveredModels } from './services/telemetry.ts';
+import { discoverModels } from './services/models.ts';
 
 dotenv.config();
 
@@ -73,6 +74,18 @@ app.get('/v1/models', (c) => {
 // Initialize playwright when server starts
 import { fileURLToPath } from 'url';
 
+// Kick off a background model discovery so /v1/models and compression use the
+// real DeepSeek context limits. discoverModels() caches + refreshes internally;
+// failures keep the manual caps. Non-fatal: the server still starts.
+async function refreshDiscoveredModels() {
+  try {
+    const models = await discoverModels();
+    applyDiscoveredModels(models);
+  } catch (err: any) {
+    console.warn('[index] Model discovery skipped:', err?.message || err);
+  }
+}
+
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   initPlaywright().then(() => {
     console.log('Playwright initialized.');
@@ -83,6 +96,9 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       fetch: app.fetch,
       port
     });
+
+    // Discover models in the background (does not block startup).
+    refreshDiscoveredModels();
   }).catch((err: any) => {
     console.error('Failed to initialize playwright:', err);
     process.exit(1);

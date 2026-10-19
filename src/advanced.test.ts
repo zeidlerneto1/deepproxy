@@ -524,3 +524,59 @@ test('telemetry and retry: reduces context limit on empty/error response and ret
     restore();
   }
 });
+
+test('streaming retry: surfaces diagnostic details when all attempts return empty streams', async () => {
+  let callCount = 0;
+  const restore = setupFetchMock((url, init) => {
+    callCount++;
+    // Every attempt returns an empty (already-closed) stream -> DeepSeek sends no bytes.
+    const stream = new ReadableStream({ start(c) { c.close(); } });
+    return new Response(stream, { status: 200 });
+  });
+
+  try {
+    const req = new Request('http://localhost/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'deepseek-v4-flash',
+        messages: [{ role: 'user', content: 'hello' }],
+        stream: true
+      })
+    });
+
+    const res = await app.fetch(req);
+    assert.strictEqual(res.status, 500);
+    assert.ok(callCount >= 3, `Expected at least 3 upstream attempts, got ${callCount}`);
+
+    const body = await res.json();
+    const msg = body.error?.message || '';
+    // The diagnostic must explain WHY the attempts failed instead of a generic message.
+    assert.ok(msg.includes('Failed to get a valid stream'), 'Should keep the failure summary');
+    assert.ok(msg.includes('stream was empty'), 'Should expose the real reason (empty stream)');
+    assert.ok(msg.includes('Attempt 1') && msg.includes('Attempt 2'), 'Should enumerate each failed attempt');
+  } finally {
+    restore();
+  }
+});
+
+test('telemetry: per-model context cap prevents inflating the pro limit', async () => {
+  const { getModelTelemetry, recordSuccess } = await import('./services/telemetry.ts');
+  const pro = getModelTelemetry('deepseek-v4-pro');
+  const capChars = 20_000 * 3.5; // pro cap in chars
+
+  // A huge "successful" prompt (e.g. 200k chars) must NOT push the limit beyond the cap.
+  recordSuccess('deepseek-v4-pro', 200_000);
+  assert.ok(
+    pro.detectedLimit <= capChars + 1,
+    `pro detectedLimit should be capped at ~${capChars}, got ${pro.detectedLimit}`
+  );
+
+  // Flash still gets a generous cap.
+  const flash = getModelTelemetry('deepseek-v4-flash');
+  recordSuccess('deepseek-v4-flash', 200_000);
+  assert.ok(
+    flash.detectedLimit <= 64_000 * 3.5 + 1,
+    `flash detectedLimit should be capped at 64k tokens, got ${flash.detectedLimit}`
+  );
+});

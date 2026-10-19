@@ -365,26 +365,18 @@ deepsproxy/
 
 ## 🐳 Docker
 
-### docker-compose.yml
-
-```yaml
-services:
-  deepsproxy:
-    build: .
-    ports:
-      - "3000:3000"
-    environment:
-      - PORT=3000
-      - PLAYWRIGHT_HEADLESS=true
-    volumes:
-      - ./deepseek_profile:/app/deepseek_profile
-    restart: unless-stopped
-```
+O `docker-compose.yml` constrói a imagem (que instala o Chromium embutido do
+Playwright, então não depende de um Chrome do sistema) e expõe a porta 3000.
+O volume `./deepseek_profile` persiste a sessão/headers capturados do DeepSeek
+entre reinícios do container.
 
 ### Build e Execução
 
 ```bash
-# Build
+# Definir a chave de API (opcional, mas recomendado em produção)
+export API_KEY=sua_chave_secreta
+
+# Build da imagem
 docker-compose build
 
 # Executar em background
@@ -396,6 +388,15 @@ docker-compose logs -f
 # Parar
 docker-compose down
 ```
+
+> **Notas:**
+> - Em produção, defina `API_KEY` (via `.env` ou variável de ambiente) para
+>   proteger os endpoints. O compose a injeta a partir de `${API_KEY:-...}`.
+> - O container usa o Chromium do Playwright (instalado no `Dockerfile`). Para
+>   usar o Chrome do sistema, defina `PLAYWRIGHT_CHANNEL=chrome` no ambiente do
+>   container (requer instalar o Chrome na imagem).
+> - Todas as variáveis de resiliência/TLS/cache/descoberta de modelos podem ser
+>   adicionadas em `environment:` — veja o `.env.example` para a lista completa.
 
 ---
 

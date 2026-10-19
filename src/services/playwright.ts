@@ -10,10 +10,85 @@
 
 import { chromium, BrowserContext, Page } from 'playwright';
 import path from 'path';
+import fs from 'fs';
 
 let context: BrowserContext | null = null;
 export let activePage: Page | null = null;
 let currentHeaders: Record<string, string> = {};
+
+// ─── Session/header cache ───────────────────────────────────────────────────────
+// Capturing PoW/headers via Playwright means navigating the browser, waiting for
+// the chat input and intercepting a completion request. Doing that on EVERY request
+// is slow and fragile. Instead we cache the captured session and reuse it until it
+// expires (or until a request signals it is stale), which dramatically cuts browser
+// churn and the associated intermittent failures.
+
+interface SessionCache {
+  headers: Record<string, string>;
+  chatSessionId: string;
+  parentMessageId: number | null;
+  capturedAt: number; // ms epoch when the cache was last refreshed
+}
+
+function headersFile(): string {
+  return process.env.DEEPSPROXY_HEADERS_FILE || path.join(path.resolve('deepseek_profile'), 'session_headers.json');
+}
+
+function headersTtlMs(): number {
+  return Number(process.env.DEEPSPROXY_HEADERS_TTL_MS || 5 * 60 * 1000); // default 5 min
+}
+
+let sessionCache: SessionCache | null = null;
+let sessionInvalidated = false;
+
+// Exported for unit tests.
+export function loadSessionCache(): SessionCache | null {
+  if (sessionCache) return sessionCache;
+  const file = headersFile();
+  try {
+    if (fs.existsSync(file)) {
+      const raw = JSON.parse(fs.readFileSync(file, 'utf-8'));
+      if (raw && raw.headers && typeof raw.capturedAt === 'number') {
+        sessionCache = raw as SessionCache;
+        currentHeaders = raw.headers;
+      }
+    }
+  } catch (err: any) {
+    console.warn('[playwright] Failed to load session cache:', err?.message || err);
+  }
+  return sessionCache;
+}
+
+function saveSessionCache(cache: SessionCache): void {
+  sessionCache = cache;
+  currentHeaders = cache.headers;
+  try {
+    const file = headersFile();
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(cache, null, 2), 'utf-8');
+  } catch (err: any) {
+    console.warn('[playwright] Failed to persist session cache:', err?.message || err);
+  }
+}
+
+// Exported for unit tests.
+export function isCacheFresh(cache: SessionCache): boolean {
+  return Date.now() - cache.capturedAt < headersTtlMs();
+}
+
+// Exported for unit tests.
+export function sessionCacheForTest(): SessionCache | null {
+  return sessionCache;
+}
+
+/**
+ * Force the next getDeepSeekHeaders call to re-capture (navigate + intercept)
+ * even if a fresh cache exists. Used when a request fails with a stale PoW/
+ * session error.
+ */
+export function invalidateSession(): void {
+  sessionInvalidated = true;
+}
 
 export async function initPlaywright(headless = true) {
   if (process.env.TEST_MOCK_PLAYWRIGHT) return;
@@ -27,9 +102,15 @@ export async function initPlaywright(headless = true) {
   // (e.g. "chrome" for system Chrome, "msedge" for Edge). This avoids the large
   // bundled Chromium download. Falls back to the bundled browser when unset/empty.
   const channel = process.env.PLAYWRIGHT_CHANNEL || undefined;
+  // Mirror the TLS-relaxation from deepseek.ts: when DEEPSPROXY_INSECURE_TLS is
+  // set, also let the browser ignore invalid HTTPS certs. This is required inside
+  // containers (the bundled Chromium has no host CA store) when local SSL-
+  // inspection injects a self-signed cert into the chain.
+  const ignoreHTTPSErrors = process.env.DEEPSPROXY_INSECURE_TLS === 'true';
 
   context = await chromium.launchPersistentContext(profilePath, {
     headless,
+    ignoreHTTPSErrors,
     ...(channel ? { channel } : {}),
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
     args: [
@@ -64,6 +145,16 @@ export async function getDeepSeekHeaders(forceNew = false): Promise<{ headers: R
     const mockSessionId = process.env.TEST_SESSION_ID || 'mock-session';
     return { headers: { authorization: 'Bearer MOCK' }, chatSessionId: mockSessionId, parentMessageId: null };
   }
+
+  // Reuse a fresh cached session instead of re-navigating the browser. Only
+  // re-capture when forced, when the cache has expired, or when a prior request
+  // flagged the session as stale.
+  const cached = loadSessionCache();
+  if (!forceNew && !sessionInvalidated && cached && isCacheFresh(cached)) {
+    return { headers: cached.headers, chatSessionId: cached.chatSessionId, parentMessageId: cached.parentMessageId };
+  }
+  // If we are re-capturing, clear the stale flag so the next request can reuse it.
+  sessionInvalidated = false;
 
   if (!activePage) {
     throw new Error('Playwright not initialized');
@@ -150,6 +241,15 @@ export async function getDeepSeekHeaders(forceNew = false): Promise<{ headers: R
       };
 
       currentHeaders = extractedHeaders;
+
+      // Persist the freshly captured session so subsequent requests reuse it
+      // instead of re-navigating the browser.
+      saveSessionCache({
+        headers: extractedHeaders,
+        chatSessionId: uiSessionId,
+        parentMessageId: uiParentMessageId,
+        capturedAt: Date.now(),
+      });
 
       // Abort to prevent polluting chat history
       await route.abort('aborted');

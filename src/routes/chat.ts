@@ -11,7 +11,8 @@
 import { Context } from 'hono';
 import { stream as honoStream } from 'hono/streaming';
 import { v4 as uuidv4 } from 'uuid';
-import { createDeepSeekStream, updateSessionParent } from '../services/deepseek.ts';
+import { createDeepSeekStream, updateSessionParent, isSessionError } from '../services/deepseek.ts';
+import { invalidateSession } from '../services/playwright.ts';
 import { OpenAIRequest, ChoiceDelta, Message, ToolCall, Usage } from '../utils/types.ts';
 import { robustParseJSON } from '../utils/json.ts';
 import { getModelTelemetry, recordSuccess, recordFailure } from '../services/telemetry.ts';
@@ -343,7 +344,12 @@ async function parseDeepSeekStreamToOpenAI(
       args[unclosedParameterMatch[1]] = coerceParameterValue(unclosedParameterMatch[2]);
     }
 
-    if (Object.keys(args).length === 0) throw new Error('Unrecoverable tool call');
+    if (Object.keys(args).length === 0) {
+      // Diagnostic: log the raw block that could not be parsed so we can see the
+      // exact format DeepSeek emitted (this is why tools sometimes silently drop).
+      console.warn('[chat] Unrecoverable tool call. openTag=' + JSON.stringify(openTag) + ' block=' + JSON.stringify(block));
+      throw new Error('Unrecoverable tool call');
+    }
     const toolName = extractToolName(openTag, block) || inferToolNameFromParameters(args, tools);
     if (!toolName) throw new Error('Recoverable tool call missing name');
     return { name: toolName, arguments: args };
@@ -594,10 +600,22 @@ async function parseDeepSeekStreamToOpenAI(
   };
 }
 
-async function peekStream(stream: ReadableStream): Promise<{ isEmpty: boolean; peekedStream: ReadableStream }> {
+async function peekStream(stream: ReadableStream, timeoutMs = 15000): Promise<{ isEmpty: boolean; peekedStream: ReadableStream }> {
   const reader = stream.getReader();
   try {
-    const { done, value } = await reader.read();
+    // Guard: if DeepSeek accepts the connection but never sends the first chunk
+    // (e.g. transient upstream stall), fail fast instead of hanging indefinitely.
+    // The timer is cleared once the read resolves to avoid a dangling timeout.
+    const firstRead = await new Promise<{ done: boolean; value?: any }>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error(`Timed out after ${timeoutMs}ms waiting for first stream chunk from DeepSeek`));
+      }, timeoutMs);
+      reader.read().then(
+        (r) => { clearTimeout(timer); resolve(r); },
+        (e) => { clearTimeout(timer); reject(e); }
+      );
+    });
+    const { done, value } = firstRead;
     if (done) {
       return { isEmpty: true, peekedStream: new ReadableStream({ start(c) { c.close(); } }) };
     }
@@ -625,7 +643,12 @@ async function peekStream(stream: ReadableStream): Promise<{ isEmpty: boolean; p
     
     return { isEmpty: false, peekedStream };
   } catch (err) {
-    reader.releaseLock();
+    try {
+      // Cancel the underlying read so a pending reader.read() (e.g. on timeout)
+      // is not left dangling before we release the lock.
+      await stream.cancel();
+    } catch {}
+    try { reader.releaseLock(); } catch {}
     throw err;
   }
 }
@@ -640,10 +663,14 @@ export async function chatCompletions(c: Context) {
     const isProModel = body.model.includes('pro');
     const completionId = 'chatcmpl-' + uuidv4();
 
+    // Resiliência contra erros upstream intermitentes (configurável via env).
+    const maxAttempts = Number(process.env.DEEPSPROXY_MAX_ATTEMPTS || 3);
+    const retryBackoffMs = Number(process.env.DEEPSPROXY_RETRY_BACKOFF_MS || 1000);
+    const firstChunkTimeoutMs = Number(process.env.DEEPSPROXY_FIRST_CHUNK_TIMEOUT_MS || 15000);
+
     if (!isStream) {
       let attempt = 0;
-      const maxAttempts = 3;
-      let lastError: any = null;
+      const attemptErrors: string[] = []; // diagnostic: collect why each attempt failed
       let parsedResult: ParsedCompletion | null = null;
       let finalUiSessionId = '';
 
@@ -673,8 +700,13 @@ export async function chatCompletions(c: Context) {
           );
 
           if (parsed.content === '' && parsed.toolCalls.length === 0) {
-            console.warn(`[Chat] Attempt ${attempt} (non-stream) response was empty.`);
+            const reason = 'response was empty (DeepSeek returned no content/tool calls)';
+            console.warn(`[Chat] Attempt ${attempt} (non-stream) ${reason}.`);
+            attemptErrors.push(`Attempt ${attempt}: ${reason}`);
             recordFailure(body.model, promptSize);
+            // An empty response usually means the session/PoW is stale; force a
+            // fresh header capture on the next attempt instead of reusing the cache.
+            invalidateSession();
             continue;
           }
 
@@ -684,18 +716,28 @@ export async function chatCompletions(c: Context) {
           finalUiSessionId = result.uiSessionId;
           break;
         } catch (err: any) {
-          console.error(`[Chat] Attempt ${attempt} (non-stream) failed:`, err.message);
-          lastError = err;
+          const reason = err?.message || String(err);
+          console.error(`[Chat] Attempt ${attempt} (non-stream) failed:`, reason);
+          attemptErrors.push(`Attempt ${attempt}: ${reason}`);
           recordFailure(body.model, promptSize);
+          // If the failure is session-related, force a fresh header capture next attempt.
+          if (isSessionError(reason)) {
+            invalidateSession();
+          }
           if (attempt >= maxAttempts) {
             break;
           }
-          await new Promise(r => setTimeout(r, 1000));
+          // Backoff exponencial entre tentativas para dar tempo ao DeepSeek se estabilizar.
+          const backoffMs = retryBackoffMs * Math.pow(2, attempt - 1);
+          await new Promise(r => setTimeout(r, backoffMs));
         }
       }
 
       if (!parsedResult) {
-        throw lastError || new Error("Failed to get a non-empty response from DeepSeek after multiple attempts.");
+        const detail = attemptErrors.length
+          ? attemptErrors.join(' | ')
+          : 'no attempts were made';
+        throw new Error(`Failed to get a non-empty response from DeepSeek after ${maxAttempts} attempts. Details: ${detail}`);
       }
 
       const message: any = {
@@ -724,8 +766,7 @@ export async function chatCompletions(c: Context) {
     let deepSeekStream: ReadableStream | null = null;
     let uiSessionId = '';
     let attempt = 0;
-    const maxAttempts = 3;
-    let lastError: any = null;
+    const attemptErrors: string[] = []; // diagnostic: collect why each attempt failed
     let promptSizeUsed = 0;
 
     while (attempt < maxAttempts) {
@@ -743,11 +784,16 @@ export async function chatCompletions(c: Context) {
         console.log(`[Chat] Attempt ${attempt}/${maxAttempts} (stream) with prompt length ${promptSizeUsed} chars.`);
         const result = await createDeepSeekStream(finalPrompt, isThinkingModel, isProModel, null);
         
-        // Peek the stream to verify it has content
-        const { isEmpty, peekedStream } = await peekStream(result.stream);
+        // Peek the stream to verify it has content (with a first-chunk timeout guard)
+        const { isEmpty, peekedStream } = await peekStream(result.stream, firstChunkTimeoutMs);
         if (isEmpty) {
-          console.warn(`[Chat] Attempt ${attempt} (stream) peeked stream was empty.`);
+          const reason = 'stream was empty (no bytes received from DeepSeek)';
+          console.warn(`[Chat] Attempt ${attempt} (stream) ${reason}.`);
+          attemptErrors.push(`Attempt ${attempt}: ${reason}`);
           recordFailure(body.model, promptSizeUsed);
+          // An empty stream usually means the session/PoW is stale; force a
+          // fresh header capture on the next attempt instead of reusing the cache.
+          invalidateSession();
           continue;
         }
 
@@ -757,18 +803,28 @@ export async function chatCompletions(c: Context) {
         uiSessionId = result.uiSessionId;
         break;
       } catch (err: any) {
-        console.error(`[Chat] Attempt ${attempt} (stream) failed:`, err.message);
-        lastError = err;
+        const reason = err?.message || String(err);
+        console.error(`[Chat] Attempt ${attempt} (stream) failed:`, reason);
+        attemptErrors.push(`Attempt ${attempt}: ${reason}`);
         recordFailure(body.model, promptSizeUsed);
+        // If the failure is session-related, force a fresh header capture next attempt.
+        if (isSessionError(reason)) {
+          invalidateSession();
+        }
         if (attempt >= maxAttempts) {
           break;
         }
-        await new Promise(r => setTimeout(r, 1000));
+        // Backoff exponencial entre tentativas para dar tempo ao DeepSeek se estabilizar.
+        const backoffMs = retryBackoffMs * Math.pow(2, attempt - 1);
+        await new Promise(r => setTimeout(r, backoffMs));
       }
     }
 
     if (!deepSeekStream) {
-      throw lastError || new Error("Failed to get a valid stream from DeepSeek after multiple attempts.");
+      const detail = attemptErrors.length
+        ? attemptErrors.join(' | ')
+        : 'no attempts were made';
+      throw new Error(`Failed to get a valid stream from DeepSeek after ${maxAttempts} attempts. Details: ${detail}`);
     }
 
     c.header('Content-Type', 'text/event-stream');

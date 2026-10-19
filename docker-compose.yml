@@ -1,12 +1,40 @@
-version: '3.8'
 services:
   deepsproxy:
     build: .
+    image: deepsproxy:latest
+    container_name: deepsproxy
     ports:
       - "3000:3000"
     environment:
       - PORT=3000
-      - API_KEY=sua_api_key_aqui
+      # Chave de API para proteger os endpoints (Bearer / X-API-Key). Obrigatória em produção.
+      - API_KEY=${API_KEY:-sua_api_key_aqui}
+      # Navegação do browser. No container usamos o Chromium embutido do Playwright
+      # (instalado no Dockerfile), portanto NÃO definimos PLAYWRIGHT_CHANNEL aqui.
+      - PLAYWRIGHT_HEADLESS=true
+      - PLAYWRIGHT_TIMEOUT=30000
+      # Relaxa a verificação TLS na conexão ao chat.deepseek.com (redes confiáveis).
+      # Necessário quando SSL-inspection local injeta cert auto-assinado (inclusive
+      # no Chromium do container, que não tem o CA store do host).
+      - DEEPSPROXY_INSECURE_TLS=${DEEPSPROXY_INSECURE_TLS:-false}
+      # Resiliência contra falhas intermitentes upstream.
+      # DEEPSPROXY_MAX_ATTEMPTS=3
+      # DEEPSPROXY_RETRY_BACKOFF_MS=1000
+      # DEEPSPROXY_FIRST_CHUNK_TIMEOUT_MS=15000
+      # Estabilidade de sessão (cache de headers/PoW).
+      # DEEPSPROXY_HEADERS_TTL_MS=300000
+      # DEEPSPROXY_HEADERS_FILE=/app/deepseek_profile/session_headers.json
+      # Descoberta dinâmica de modelos.
+      # DEEPSPROXY_MODELS_REFRESH_MS=3600000
+      # DEEPSPROXY_MODELS_MAX_TOKENS=1000000
+      - LOG_LEVEL=info
     volumes:
+      # Persiste a sessão/headers capturados do DeepSeek entre reinícios do container.
       - ./deepseek_profile:/app/deepseek_profile
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "const k=process.env.API_KEY;const h=k?{Authorization:'Bearer '+k}:{};fetch('http://localhost:3000/health',{headers:h}).then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s

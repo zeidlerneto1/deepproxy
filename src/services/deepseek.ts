@@ -11,7 +11,7 @@
  *   middleware (antivirus/firewall) on the connection to chat.deepseek.com.
  */
 
-import { getDeepSeekHeaders } from './playwright.ts';
+import { getDeepSeekHeaders, invalidateSession } from './playwright.ts';
 import { Agent, fetch as undiciFetch } from 'undici';
 
 // In-memory state to track the last message ID per session to avoid overwriting
@@ -69,7 +69,7 @@ async function fetchDeepSeek(
     body: JSON.stringify(payload),
   };
 
-  if (process.env.DEEPSPROXY_INSECURE_TLS === 'true') {
+  if (process.env.DEEPSPROXY_INSECURE_TLS === 'true' && process.env.TEST_MOCK_PLAYWRIGHT !== 'true') {
     // Relax TLS verification only for the DeepSeek upstream connection.
     const agent = new Agent({
       connect: { rejectUnauthorized: false },
@@ -115,12 +115,40 @@ export async function createDeepSeekStream(
     preempt: false
   };
 
-  const response = await fetchDeepSeek(payload, headers);
+  let response: Response;
+  try {
+    response = await fetchDeepSeek(payload, headers);
+  } catch (err: any) {
+    // Capture the real network error (undici wraps low-level failures as "fetch failed").
+    const detail = err?.cause?.message || err?.message || String(err);
+    console.error(`[deepseek] fetchDeepSeek failed. isPro=${isProModel} modelType=${payload.model_type} promptLen=${prompt.length} error=${detail}`);
+    throw new Error(`DeepSeek fetch failed: ${detail}`);
+  }
 
   if (!response.ok || !response.body) {
     const errText = await response.text().catch(() => '');
+    // A non-2xx (401, 403, 409...) usually means the session/token/PoW is stale.
+    // Flag it so the caller's retry re-captures fresh headers instead of reusing them.
+    if (response.status === 401 || response.status === 403 || response.status === 409) {
+      invalidateSession();
+    }
     throw new Error(`Failed to fetch from DeepSeek: ${response.status} ${response.statusText} - ${errText}`);
   }
 
   return { stream: response.body, headers, uiSessionId: chatSessionId };
+}
+
+/**
+ * True when the upstream error indicates a stale/expired session or PoW that
+ * should be recovered by re-capturing headers.
+ */
+export function isSessionError(message: string): boolean {
+  return (
+    /account is suspended/i.test(message) ||
+    /login is required/i.test(message) ||
+    /chat input unavailable/i.test(message) ||
+    /timeout waiting for pow headers/i.test(message) ||
+    /timeout waiting for chat input/i.test(message) ||
+    /401/i.test(message)
+  );
 }
