@@ -9,8 +9,8 @@ telemetry = false
 
 [providers.deepsproxy]
 type = "openai_legacy"
-base_url = "http://localhost:3000/v1"
-api_key = "dummy-key"
+base_url = "http://localhost:3030/v1"
+api_key = "sua_api_key_aqui"
 
 [models."deepsproxy/deepseek-v4-flash"]
 provider = "deepsproxy"

@@ -9,12 +9,12 @@ converse e execute ferramentas com modelos DeepSeek servidos via `chat.deepseek.
 ## Visão geral
 
 O Kimi Code CLI conecta-se a provedores de modelo via base URL OpenAI-compatível. O
-DeepsProxy expõe essa interface em `http://localhost:3000/v1`, roteando as chamadas para
+DeepsProxy expõe essa interface em `http://localhost:3030/v1`, roteando as chamadas para
 o DeepSeek por meio de uma sessão persistente do Playwright (headers de autenticação +
 PoW).
 
 ```
-Kimi Code CLI ── openai_legacy ──▶ DeepsProxy (:3000) ──▶ chat.deepseek.com
+Kimi Code CLI ── openai_legacy ──▶ DeepsProxy (:3030) ──▶ chat.deepseek.com
                                     (Playwright session)
 ```
 
@@ -23,7 +23,7 @@ Kimi Code CLI ── openai_legacy ──▶ DeepsProxy (:3000) ──▶ chat.d
 ## Pré-requisitos
 
 - Node.js v20+ e npm
-- DeepsProxy rodando localmente (porta 3000)
+- DeepsProxy rodando localmente (porta 3030)
 - Kimi Code CLI instalado (pacote `kimi-code`)
 
 ---
@@ -55,7 +55,7 @@ npm run login   # abre navegador para login e salva a sessão em deepseek_profil
 Confirme que o servidor está de pé:
 
 ```bash
-curl http://localhost:3000/v1/models
+curl http://localhost:3030/v1/models
 ```
 
 ---
@@ -69,7 +69,7 @@ OpenAI-compatível. Crie um arquivo de configuração isolado (ex.: `kimi-config
 # Exemplo: integration/kimi-config.toml
 [provider.deepsproxy]
 type = "openai_legacy"
-base_url = "http://localhost:3000/v1"
+base_url = "http://localhost:3030/v1"
 api_key = "sk-no-key-required"
 
 [model.deepsproxy/deepseek-v4-flash]
@@ -95,7 +95,7 @@ max_context_size = 131072
 default_model = "deepsproxy/deepseek-v4-flash-thinking"
 ```
 
-> O `api_key` pode ser um valor dummy; o DeepsProxy não exige uma chave real localmente.
+> O `api_key` deve ser igual ao `API_KEY` definido no `docker-compose.yml` (default: `sua_api_key_aqui`). Sem ela, o DeepsProxy responde `401 Unauthorized`.
 
 ---
 
@@ -160,7 +160,7 @@ conteúdo visível ao usuário.
 | Erros `SELF_SIGNED_CERT_IN_CHAIN` intermitentes ao chamar o DeepSeek | Interceptação TLS (antivírus/firewall) injetando cert auto-assinado | Iniciar com `DEEPSPROXY_INSECURE_TLS=true` |
 | Playwright trava ao baixar o Chromium | Rede bloqueando o download | Usar `PLAYWRIGHT_CHANNEL=chrome` (ou `msedge`) |
 | `403 account suspended` / `401 login required` | Sessão DeepSeek inválida/expirou | Rodar `npm run login` novamente |
-| Porta 3000 ocupada / processo órfão segurando `deepseek_profile` | Servidor anterior não finalizou | Matar o processo: `taskkill //PID <pid> //F` (Windows) |
+| Porta 3030 ocupada / processo órfão segurando `deepseek_profile` | Servidor anterior não finalizou | Matar o processo: `taskkill //PID <pid> //F` (Windows) |
 | Saída do Kimi CLI com caracteres quebrados no Windows | Console em codepage cp1252 | Prefixar com `PYTHONUTF8=1` |
 
 ---

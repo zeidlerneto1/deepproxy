@@ -95,8 +95,8 @@ docker-compose up -d
 Crie o arquivo `.env` na raiz do projeto:
 
 ```env
-# Porta do servidor (default: 3000)
-PORT=3000
+# Porta do servidor (default: 3030)
+PORT=3030
 
 # Chave de API para proteger endpoints (opcional)
 API_KEY=sua-chave-secreta-aqui
@@ -113,7 +113,7 @@ LOG_LEVEL=info
 
 | Variável | Descrição | Default | Obrigatória |
 |----------|-----------|---------|------------|
-| `PORT` | Porta HTTP do servidor | `3000` | Não |
+| `PORT` | Porta HTTP do servidor | `3030` | Não |
 | `API_KEY` | Chave para autenticação de requests | - | Não |
 | `PLAYWRIGHT_HEADLESS` | Executar browser em modo headless | `true` | Não |
 | `PLAYWRIGHT_TIMEOUT` | Timeout para operações do Playwright (ms) | `30000` | Não |
@@ -130,10 +130,10 @@ Se `API_KEY` estiver configurada, todas as requisições devem incluir uma das o
 
 ```bash
 # Via Bearer Token
-curl -H "Authorization: Bearer sua-chave" http://localhost:3000/v1/chat/completions
+curl -H "Authorization: Bearer sua-chave" http://localhost:3030/v1/chat/completions
 
 # Via X-API-Key header
-curl -H "X-API-Key: sua-chave" http://localhost:3000/v1/chat/completions
+curl -H "X-API-Key: sua-chave" http://localhost:3030/v1/chat/completions
 ```
 
 Resposta para autenticação falha:
@@ -268,7 +268,7 @@ Content-Type: application/json
 ### cURL
 
 ```bash
-curl http://localhost:3000/v1/chat/completions \
+curl http://localhost:3030/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "deepseek-flash-thinking",
@@ -282,7 +282,7 @@ curl http://localhost:3000/v1/chat/completions \
 import OpenAI from 'openai';
 
 const openai = new OpenAI({
-  baseURL: 'http://localhost:3000/v1',
+  baseURL: 'http://localhost:3030/v1',
   apiKey: process.env.API_KEY || 'sk-no-key-required'
 });
 
@@ -300,7 +300,7 @@ console.log(completion.choices[0].message.content);
 from openai import OpenAI
 
 client = OpenAI(
-    base_url="http://localhost:3000/v1",
+    base_url="http://localhost:3030/v1",
     api_key="sk-no-key-required"
 )
 
@@ -366,7 +366,7 @@ deepsproxy/
 ## 🐳 Docker
 
 O `docker-compose.yml` constrói a imagem (que instala o Chromium embutido do
-Playwright, então não depende de um Chrome do sistema) e expõe a porta 3000.
+Playwright, então não depende de um Chrome do sistema) e expõe a porta 3030.
 O volume `./deepseek_profile` persiste a sessão/headers capturados do DeepSeek
 entre reinícios do container.
 

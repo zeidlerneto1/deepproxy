@@ -4,9 +4,10 @@ services:
     image: deepsproxy:latest
     container_name: deepsproxy
     ports:
-      - "3000:3000"
+      - "3030:3030"
+      - "3390:3389"
     environment:
-      - PORT=3000
+      - PORT=3030
       # Chave de API para proteger os endpoints (Bearer / X-API-Key). Obrigatória em produção.
       - API_KEY=${API_KEY:-sua_api_key_aqui}
       # Navegação do browser. No container usamos o Chromium embutido do Playwright
@@ -21,8 +22,9 @@ services:
       # DEEPSPROXY_MAX_ATTEMPTS=3
       # DEEPSPROXY_RETRY_BACKOFF_MS=1000
       # DEEPSPROXY_FIRST_CHUNK_TIMEOUT_MS=15000
-      # Estabilidade de sessão (cache de headers/PoW).
-      # DEEPSPROXY_HEADERS_TTL_MS=300000
+      # Estabilidade de sessão (cache de headers/PoW). TTL alto para reutilizar a
+      # sessão capturada em session_headers.json em vez de re-navegar o browser.
+      - DEEPSPROXY_HEADERS_TTL_MS=${DEEPSPROXY_HEADERS_TTL_MS:-43200000}
       # DEEPSPROXY_HEADERS_FILE=/app/deepseek_profile/session_headers.json
       # Descoberta dinâmica de modelos.
       # DEEPSPROXY_MODELS_REFRESH_MS=3600000
@@ -33,7 +35,7 @@ services:
       - ./deepseek_profile:/app/deepseek_profile
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "node", "-e", "const k=process.env.API_KEY;const h=k?{Authorization:'Bearer '+k}:{};fetch('http://localhost:3000/health',{headers:h}).then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "const k=process.env.API_KEY;const h=k?{Authorization:'Bearer '+k}:{};fetch('http://localhost:3030/health',{headers:h}).then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 30s
       timeout: 10s
       retries: 5

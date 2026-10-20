@@ -23,9 +23,35 @@ COPY --from=builder /app/package*.json ./
 # Install the bundled Chromium + OS dependencies for headless operation.
 RUN npx playwright install --with-deps chromium
 
+# ─── RDP / desktop ────────────────────────────────────────────────────────────
+# Instala um servidor RDP (xrdp) + desktop leve (XFCE) para logar no container.
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+       xrdp \
+       xorgxrdp \
+       xserver-xorg-core \
+       xfce4 \
+       xfce4-terminal \
+       dbus-x11 \
+       firefox-esr \
+       supervisor \
+    && rm -rf /var/lib/apt/lists/* \
+    && sed -i 's/^port=3389/port=3389/' /etc/xrdp/xrdp.ini \
+    && useradd -m -s /bin/bash user \
+    && echo "user:user" | chpasswd \
+    && echo "root:root" | chpasswd
+
+# Config Xorg do xrdp: aponta para o driver xrdpdev (xorgxrdp), necessário para
+# o X server renderizar o desktop no container headless. Sem isso o Xorg cai em
+# "no screens found" e o RDP fica com tela branca.
+COPY xrdp-conf/xorg.conf /etc/xrdp/xorg.conf
+
+# Config do supervisor: sobe o app Node e o xrdp juntos.
+COPY supervisord.conf /etc/supervisor/conf.d/deepsproxy.conf
+
 # The profile dir must exist and be writable so the browser session can persist.
 RUN mkdir -p /app/deepseek_profile
 
-ENV PORT=3000
-EXPOSE 3000
-CMD ["node", "dist/index.js"]
+ENV PORT=3030
+EXPOSE 3030 3389
+CMD ["/usr/bin/supervisord", "-n"]

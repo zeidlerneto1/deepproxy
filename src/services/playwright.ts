@@ -150,7 +150,7 @@ export async function getDeepSeekHeaders(forceNew = false): Promise<{ headers: R
   // re-capture when forced, when the cache has expired, or when a prior request
   // flagged the session as stale.
   const cached = loadSessionCache();
-  if (!forceNew && !sessionInvalidated && cached && isCacheFresh(cached)) {
+  if (cached && !sessionInvalidated) {
     return { headers: cached.headers, chatSessionId: cached.chatSessionId, parentMessageId: cached.parentMessageId };
   }
   // If we are re-capturing, clear the stale flag so the next request can reuse it.

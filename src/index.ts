@@ -89,7 +89,7 @@ async function refreshDiscoveredModels() {
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   initPlaywright().then(() => {
     console.log('Playwright initialized.');
-    const port = process.env.PORT ? parseInt(process.env.PORT) : 3000;
+    const port = process.env.PORT ? parseInt(process.env.PORT) : 3030;
     console.log(`Server is running on port ${port}`);
 
     serve({
